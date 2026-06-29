@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>Neon Snake.io — Single Player</title>
 <style>
   :root {
@@ -203,6 +203,59 @@
   .stat .l { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #8aa3b8; margin-top: 2px; }
   .controls-hint { color:#7f95aa; font-size:13px; margin-top:18px; max-width:340px; text-align:center; line-height:1.6;}
   .controls-hint b { color:#bfe9ff; }
+
+  /* ---------- Mobile boost button (touch only) ---------- */
+  #boostBtn {
+    position: absolute;
+    right: 24px;
+    bottom: 24px;
+    width: 92px;
+    height: 92px;
+    border-radius: 50%;
+    z-index: 20;
+    display: none;            /* shown via body.touch */
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #cffcff;
+    background: radial-gradient(circle at 50% 35%, rgba(0,229,255,0.30), rgba(0,229,255,0.08));
+    border: 2px solid rgba(0,229,255,0.55);
+    box-shadow: 0 0 26px rgba(0,229,255,0.30);
+    text-shadow: 0 0 8px rgba(0,229,255,0.6);
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+    transition: transform .08s ease, box-shadow .12s ease, background .12s ease;
+  }
+  #boostBtn.active {
+    transform: scale(0.92);
+    background: radial-gradient(circle at 50% 35%, rgba(0,229,255,0.55), rgba(0,229,255,0.18));
+    box-shadow: 0 0 40px rgba(0,229,255,0.7);
+  }
+
+  /* touch layout: free the bottom-right corner for the boost thumb,
+     move the minimap to the top-left so nothing overlaps */
+  body.touch #game { cursor: auto; }
+  body.touch #boostBtn { display: flex; }
+  body.touch #minimapWrap { left: 14px; right: auto; top: 14px; bottom: auto; width: 104px; height: 104px; }
+  body.touch #hint { display: none; }
+
+  /* shrink the HUD on small / narrow screens */
+  @media (max-width: 620px) {
+    #leaderboard { min-width: 150px; padding: 9px 10px; top: 12px; right: 12px; }
+    #leaderboard h3 { font-size: 10px; margin-bottom: 5px; }
+    .lb-row { font-size: 11px; padding: 2px 0; }
+    #scoreBox { left: 12px; bottom: 12px; padding: 8px 12px; }
+    #scoreBox .value { font-size: 24px; }
+    #minimapWrap { width: 92px; height: 92px; }
+    body.touch #minimapWrap { width: 92px; height: 92px; }
+    #boostBtn { width: 80px; height: 80px; right: 16px; bottom: 16px; }
+    .panel { padding: 20px 18px; }
+    input#nameInput { width: 220px; }
+  }
 </style>
 </head>
 <body>
@@ -225,6 +278,9 @@
   </div>
 
   <div id="hint" class="hud">Move: <b>Mouse</b> &nbsp;•&nbsp; Boost: <b>Left-Click / Space</b></div>
+
+  <!-- Mobile boost button -->
+  <div id="boostBtn">BOOST</div>
 
   <!-- Start screen -->
   <div id="startScreen" class="overlay">
@@ -477,10 +533,15 @@ class Snake {
   }
 
   steerPlayer(world) {
-    // aim head toward the mouse position in world space
-    const wx = world.camX + world.input.mx;
-    const wy = world.camY + world.input.my;
-    return Math.atan2(wy - this.head.y, wx - this.head.x);
+    // aim head toward the pointer (mouse / finger), measured from the head's
+    // on-screen position. A small deadzone near the head keeps the snake going
+    // straight instead of spinning when the pointer rests right on top of it.
+    const hx = this.head.x - world.camX;   // head position in screen space
+    const hy = this.head.y - world.camY;
+    const dx = world.input.mx - hx;
+    const dy = world.input.my - hy;
+    if (dx * dx + dy * dy < 30 * 30) return this.angle;
+    return Math.atan2(dy, dx);
   }
 
   steerAI(dt, world) {
@@ -576,26 +637,49 @@ class Game {
 
   bindInput() {
     const c = this.canvas;
+    const boostBtn = document.getElementById("boostBtn");
+    const isTouch = ("ontouchstart" in window) || navigator.maxTouchPoints > 0;
+    if (isTouch) document.body.classList.add("touch");
+
+    // ---- desktop: mouse steer + click boost ----
     c.addEventListener("mousemove", e => { this.input.mx = e.clientX; this.input.my = e.clientY; });
     c.addEventListener("mousedown", e => { if (e.button === 0) this.setBoost(true); });
-    window.addEventListener("mouseup",   e => { if (e.button === 0) this.setBoost(false); });
-    // touch
-    c.addEventListener("touchmove", e => {
-      const t = e.touches[0]; this.input.mx = t.clientX; this.input.my = t.clientY;
-      e.preventDefault();
-    }, { passive: false });
-    c.addEventListener("touchstart", e => {
-      const t = e.touches[0]; this.input.mx = t.clientX; this.input.my = t.clientY;
-      this.setBoost(true); e.preventDefault();
-    }, { passive: false });
-    c.addEventListener("touchend", () => this.setBoost(false));
-    // keyboard boost
+    window.addEventListener("mouseup", e => { if (e.button === 0) this.setBoost(false); });
+
+    // ---- touch: drag anywhere on the canvas to steer ----
+    // Pick the finger that started on the canvas (so the boost-button finger,
+    // which targets the button, never hijacks steering).
+    const canvasTouch = (e) => {
+      for (let i = 0; i < e.touches.length; i++)
+        if (e.touches[i].target === c) return e.touches[i];
+      return null;
+    };
+    const steerFrom = (e) => {
+      const t = canvasTouch(e);
+      if (t) { this.input.mx = t.clientX; this.input.my = t.clientY; }
+    };
+    c.addEventListener("touchstart", e => { steerFrom(e); e.preventDefault(); }, { passive: false });
+    c.addEventListener("touchmove",  e => { steerFrom(e); e.preventDefault(); }, { passive: false });
+
+    // ---- mobile boost button (independent finger) ----
+    const pressBoost = (e) => { e.preventDefault(); e.stopPropagation(); this.setBoost(true);  boostBtn.classList.add("active"); };
+    const releaseBoost = (e) => { if (e) e.preventDefault(); this.setBoost(false); boostBtn.classList.remove("active"); };
+    boostBtn.addEventListener("touchstart", pressBoost, { passive: false });
+    boostBtn.addEventListener("touchend",   releaseBoost, { passive: false });
+    boostBtn.addEventListener("touchcancel", releaseBoost, { passive: false });
+    boostBtn.addEventListener("mousedown",  pressBoost);
+    window.addEventListener("mouseup", () => releaseBoost());
+
+    // ---- keyboard boost (desktop) ----
     window.addEventListener("keydown", e => {
       if (e.code === "Space") { this.setBoost(true); e.preventDefault(); }
     });
     window.addEventListener("keyup", e => {
       if (e.code === "Space") this.setBoost(false);
     });
+
+    // re-fit on orientation change
+    window.addEventListener("orientationchange", () => setTimeout(() => this.resize(), 200));
   }
 
   setBoost(v) {
