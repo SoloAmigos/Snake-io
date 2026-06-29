@@ -290,9 +290,9 @@
       <input id="nameInput" type="text" maxlength="14" placeholder="Enter your name" />
       <button class="btn" id="playBtn">PLAY</button>
       <div class="controls-hint">
-        Steer with your <b>mouse</b>. Hold <b>Left-Click</b> or <b>Space</b> to boost
-        (it costs length). Crash into another snake's body and it dies — crash into yours
-        and <b>you</b> die. Cut off enemies to farm their glowing remains.
+        Steer with the <b>joystick</b> (or mouse on desktop) and hold <b>BOOST</b> /
+        Space to sprint — it costs length. Crash into another snake's body and it dies;
+        crash into yours and <b>you</b> die. Cut off enemies to farm their glowing remains.
       </div>
     </div>
   </div>
@@ -533,13 +533,18 @@ class Snake {
   }
 
   steerPlayer(world) {
-    // aim head toward the pointer (mouse / finger), measured from the head's
-    // on-screen position. A small deadzone near the head keeps the snake going
-    // straight instead of spinning when the pointer rests right on top of it.
-    const hx = this.head.x - world.camX;   // head position in screen space
+    const inp = world.input;
+    // Touch: steer in the DIRECTION the joystick points (not toward the finger).
+    // While the stick is released, keep the current heading (go straight).
+    if (inp.joy.active) return inp.joy.has ? inp.joy.angle : this.angle;
+    if (inp.isTouch) return this.angle;
+
+    // Desktop: aim toward the mouse, measured from the head's on-screen
+    // position, with a small deadzone so it doesn't spin under the cursor.
+    const hx = this.head.x - world.camX;
     const hy = this.head.y - world.camY;
-    const dx = world.input.mx - hx;
-    const dy = world.input.my - hy;
+    const dx = inp.mx - hx;
+    const dy = inp.my - hy;
     if (dx * dx + dy * dy < 30 * 30) return this.angle;
     return Math.atan2(dy, dx);
   }
@@ -606,7 +611,11 @@ class Game {
     this.viewW = 0; this.viewH = 0;
     this.camX = 0; this.camY = 0;
 
-    this.input = { mx: 0, my: 0, boost: false };
+    this.input = {
+      mx: 0, my: 0, boost: false, isTouch: false,
+      // floating virtual joystick (touch)
+      joy: { active: false, id: null, bx: 0, by: 0, kx: 0, ky: 0, angle: 0, has: false },
+    };
     this.hash = new SpatialHash(CFG.HASH_CELL);
     this.foodHash = new SpatialHash(CFG.HASH_CELL);
     this._queryBuf = [];
@@ -640,26 +649,61 @@ class Game {
     const boostBtn = document.getElementById("boostBtn");
     const isTouch = ("ontouchstart" in window) || navigator.maxTouchPoints > 0;
     if (isTouch) document.body.classList.add("touch");
+    this.input.isTouch = isTouch;
 
     // ---- desktop: mouse steer + click boost ----
     c.addEventListener("mousemove", e => { this.input.mx = e.clientX; this.input.my = e.clientY; });
     c.addEventListener("mousedown", e => { if (e.button === 0) this.setBoost(true); });
     window.addEventListener("mouseup", e => { if (e.button === 0) this.setBoost(false); });
 
-    // ---- touch: drag anywhere on the canvas to steer ----
-    // Pick the finger that started on the canvas (so the boost-button finger,
-    // which targets the button, never hijacks steering).
-    const canvasTouch = (e) => {
-      for (let i = 0; i < e.touches.length; i++)
-        if (e.touches[i].target === c) return e.touches[i];
+    // ---- touch: floating virtual joystick to steer ----
+    // The stick appears wherever you first press on the field. Push it in a
+    // direction and the snake heads that way (it does NOT chase your finger).
+    // Boost lives on its own button, so we only grab fingers that land on the
+    // canvas itself (the boost finger targets the button and is ignored here).
+    const joy = this.input.joy;
+    const JOY_MAX = 56;   // max knob travel from the base
+    const JOY_DEAD = 9;   // ignore tiny nudges
+    const findTouch = (list, id) => {
+      for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i];
       return null;
     };
-    const steerFrom = (e) => {
-      const t = canvasTouch(e);
-      if (t) { this.input.mx = t.clientX; this.input.my = t.clientY; }
+    c.addEventListener("touchstart", e => {
+      if (!joy.active) {
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches[i];
+          if (t.target === c) {
+            joy.active = true; joy.id = t.identifier;
+            joy.bx = joy.kx = t.clientX;
+            joy.by = joy.ky = t.clientY;
+            joy.has = false;
+            break;
+          }
+        }
+      }
+      e.preventDefault();
+    }, { passive: false });
+    c.addEventListener("touchmove", e => {
+      if (joy.active) {
+        const t = findTouch(e.touches, joy.id);
+        if (t) {
+          let dx = t.clientX - joy.bx, dy = t.clientY - joy.by;
+          const d = Math.hypot(dx, dy);
+          if (d > JOY_MAX) { dx = dx / d * JOY_MAX; dy = dy / d * JOY_MAX; }
+          joy.kx = joy.bx + dx;
+          joy.ky = joy.by + dy;
+          if (d > JOY_DEAD) { joy.angle = Math.atan2(dy, dx); joy.has = true; }
+        }
+      }
+      e.preventDefault();
+    }, { passive: false });
+    const endJoy = (e) => {
+      if (joy.active && findTouch(e.changedTouches, joy.id)) {
+        joy.active = false; joy.has = false; joy.id = null;
+      }
     };
-    c.addEventListener("touchstart", e => { steerFrom(e); e.preventDefault(); }, { passive: false });
-    c.addEventListener("touchmove",  e => { steerFrom(e); e.preventDefault(); }, { passive: false });
+    c.addEventListener("touchend", endJoy, { passive: false });
+    c.addEventListener("touchcancel", endJoy, { passive: false });
 
     // ---- mobile boost button (independent finger) ----
     const pressBoost = (e) => { e.preventDefault(); e.stopPropagation(); this.setBoost(true);  boostBtn.classList.add("active"); };
@@ -921,7 +965,35 @@ class Game {
     this.drawParticles(ctx);
     for (const s of this.snakes) if (s.alive) this.drawSnake(ctx, s);
 
+    if (this.input.joy.active) this.drawJoystick(ctx);
     this.renderMinimap();
+  }
+
+  drawJoystick(ctx) {
+    const j = this.input.joy;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); // screen space
+    ctx.save();
+    // base ring
+    ctx.beginPath();
+    ctx.arc(j.bx, j.by, 56, 0, TAU);
+    ctx.fillStyle = "rgba(0,229,255,0.06)";
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(0,229,255,0.45)";
+    ctx.shadowColor = "rgba(0,229,255,0.6)";
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    // knob
+    ctx.beginPath();
+    ctx.arc(j.kx, j.ky, 26, 0, TAU);
+    ctx.fillStyle = "rgba(0,229,255,0.30)";
+    ctx.shadowBlur = 18;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(190,250,255,0.85)";
+    ctx.stroke();
+    ctx.restore();
   }
 
   drawBackground(ctx) {
